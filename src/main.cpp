@@ -64,7 +64,8 @@ void drawEffectsChain();
 void drawParameterPanel();
 void drawFooter();
 void handleButtons();
-void sendMIDICommand(uint8_t cmd, uint8_t data1, uint8_t data2);
+void sendProgramChange(uint8_t preset);
+void sendControlChange(uint8_t controller, uint8_t value);
 void drawBox(int x, int y, int w, int h, uint16_t color, const char* text);
 void drawKnob(int x, int y, int size, uint8_t value, const char* label);
 
@@ -94,11 +95,11 @@ void loop() {
   handleButtons();
   
   if (MIDI.read()) {
-    uint8_t cmd = MIDI.getType();
+    midi::MidiType cmd = MIDI.getType();
     uint8_t data1 = MIDI.getData1();
     uint8_t data2 = MIDI.getData2();
     
-    Serial.printf("MIDI IN: Type=0x%02X, Data1=%d, Data2=%d\n", cmd, data1, data2);
+    Serial.printf("MIDI IN: Type=%d, Data1=%d, Data2=%d\n", cmd, data1, data2);
   }
   
   if (millis() - uiState.lastUpdate >= DISPLAY_UPDATE_RATE) {
@@ -382,6 +383,22 @@ void drawBox(int x, int y, int w, int h, uint16_t color, const char* text) {
 }
 
 // ============================================================================
+// ENVIAR PROGRAM CHANGE (Mudança de Preset)
+// ============================================================================
+void sendProgramChange(uint8_t preset) {
+  MIDI.sendProgramChange(preset, 1);  // Canal 1
+  Serial.printf("MIDI OUT: Program Change = %d (Channel 1)\n", preset);
+}
+
+// ============================================================================
+// ENVIAR CONTROL CHANGE (Parâmetros)
+// ============================================================================
+void sendControlChange(uint8_t controller, uint8_t value) {
+  MIDI.sendControlChange(controller, value, 1);  // Canal 1
+  Serial.printf("MIDI OUT: CC #%d = %d (Channel 1)\n", controller, value);
+}
+
+// ============================================================================
 // TRATAMENTO DE BOTÕES
 // ============================================================================
 void handleButtons() {
@@ -391,7 +408,7 @@ void handleButtons() {
   if (digitalRead(BTN_LEFT) == LOW && millis() - lastPress[0] > DEBOUNCE_TIME) {
     if (uiState.currentPreset > 0) {
       uiState.currentPreset--;
-      sendMIDICommand(0xC0, uiState.currentPreset, 0);
+      sendProgramChange(uiState.currentPreset);
       Serial.printf("↓ Preset: %d\n", uiState.currentPreset);
     }
     lastPress[0] = millis();
@@ -401,7 +418,7 @@ void handleButtons() {
   if (digitalRead(BTN_RIGHT) == LOW && millis() - lastPress[1] > DEBOUNCE_TIME) {
     if (uiState.currentPreset < PRESET_MAX) {
       uiState.currentPreset++;
-      sendMIDICommand(0xC0, uiState.currentPreset, 0);
+      sendProgramChange(uiState.currentPreset);
       Serial.printf("↑ Preset: %d\n", uiState.currentPreset);
     }
     lastPress[1] = millis();
@@ -410,6 +427,7 @@ void handleButtons() {
   // Botão ENTER - Select
   if (digitalRead(BTN_ENTER) == LOW && millis() - lastPress[2] > DEBOUNCE_TIME) {
     Serial.println("✓ Select pressed");
+    sendControlChange(7, uiState.volume);  // CC 7 = Volume
     lastPress[2] = millis();
   }
   
@@ -419,12 +437,4 @@ void handleButtons() {
     Serial.printf("→ Tab: %d\n", uiState.currentTab);
     lastPress[3] = millis();
   }
-}
-
-// ============================================================================
-// ENVIAR COMANDO MIDI
-// ============================================================================
-void sendMIDICommand(uint8_t cmd, uint8_t data1, uint8_t data2) {
-  MIDI.send(cmd, data1, data2, 1);
-  Serial.printf("MIDI OUT: Cmd=0x%02X, D1=%d, D2=%d\n", cmd, data1, data2);
 }
