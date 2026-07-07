@@ -74,16 +74,16 @@ void drawKnob(int x, int y, int size, uint8_t value, const char* label);
 // ============================================================================
 void setup() {
   Serial.begin(115200);
-  delay(2000);
+  delay(1000);
   
   Serial.println("\n\n╔════════════════════════════════════════╗");
   Serial.println("║   VALETON GP200LT CONTROLLER v1.0    ║");
   Serial.println("║      Display: ILI9341 (320x240)      ║");
   Serial.println("╚════════════════════════════════════════╝\n");
   
+  initButtons();
   initDisplay();
   initMIDI();
-  initButtons();
   
   Serial.println("✓ System Ready!");
 }
@@ -114,11 +114,46 @@ void loop() {
 // INICIALIZAÇÃO DISPLAY
 // ============================================================================
 void initDisplay() {
-  display.begin();
+  Serial.println("Initializing display...");
+  
+  // Resetar pino RST
+  pinMode(TFT_RST, OUTPUT);
+  digitalWrite(TFT_RST, HIGH);
+  delay(100);
+  digitalWrite(TFT_RST, LOW);
+  delay(100);
+  digitalWrite(TFT_RST, HIGH);
+  delay(200);
+  
+  Serial.println("RST pulso completo");
+  
+  // Inicializar SPI
+  SPI.begin(TFT_CLK, TFT_MISO, TFT_MOSI);
+  Serial.println("SPI iniciado");
+  
+  // Inicializar display
+  if (!display.begin()) {
+    Serial.println("ERROR: Display initialization failed!");
+    while(1) {
+      Serial.println("✗ Display failed");
+      delay(1000);
+    }
+  }
+  
+  Serial.println("Display initialized successfully");
+  
   display.setRotation(0);
   display.fillScreen(COLOR_BG);
   
+  // Teste de cor - desenhar quadrado ciano
+  display.fillRect(0, 0, 50, 50, COLOR_ACCENT);
+  Serial.println("Drew test rectangle");
+  
+  delay(1000);
+  
   // Tela de splash
+  display.fillScreen(COLOR_BG);
+  
   display.setTextColor(COLOR_ACCENT);
   display.setTextSize(3);
   display.setCursor(50, 100);
@@ -130,7 +165,7 @@ void initDisplay() {
   display.println("COMPANION");
   
   display.setCursor(60, 170);
-  display.println("Initializing...");
+  display.println("Ready!");
   
   delay(2000);
   
@@ -195,8 +230,7 @@ void drawHeader() {
   // Título central
   display.setTextColor(COLOR_TEXT);
   display.setTextSize(2);
-  int textWidth = 120;
-  display.setCursor((SCREEN_WIDTH - textWidth) / 2, 8);
+  display.setCursor(110, 8);
   display.print("GP200");
   
   // BPM
