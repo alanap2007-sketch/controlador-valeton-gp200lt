@@ -1,69 +1,72 @@
 #include <Arduino.h>
 #include <SPI.h>
-#include <Wire.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_ILI9341.h>
 #include <MIDI.h>
+#include "config.h"
 
 // ============================================================================
-// CONFIGURAÇÃO DO DISPLAY ILI9341 (320x240)
+// INSTÂNCIAS
 // ============================================================================
-#define SCREEN_WIDTH 320
-#define SCREEN_HEIGHT 240
-
-// Pinos SPI para ESP32-S3
-#define TFT_CS 10
-#define TFT_DC 8
-#define TFT_RST 9
-#define TFT_MOSI 11
-#define TFT_CLK 12
-#define TFT_MISO 13
-
 Adafruit_ILI9341 display = Adafruit_ILI9341(TFT_CS, TFT_DC, TFT_MOSI, TFT_CLK, TFT_RST, TFT_MISO);
-
-// ============================================================================
-// CONFIGURAÇÃO MIDI / COMUNICAÇÃO COM PEDALEIRA
-// ============================================================================
 MIDI_CREATE_INSTANCE(HardwareSerial, Serial1, MIDI);
 
 // ============================================================================
 // ESTRUTURA DE DADOS
 // ============================================================================
-struct PedalState {
-  uint8_t currentPreset;
-  uint8_t volume;
-  bool bypass;
-  uint8_t activeEffects[10];
-  uint8_t parameterValues[20];
+struct EffectSlot {
+  const char* name;
+  uint16_t color;
+  bool active;
+  int x, y, width, height;
 };
 
-PedalState pedalState = {0, 100, false, {0}, {0}};
+struct UIState {
+  uint8_t currentPreset;
+  uint8_t currentTab;  // 0=AMP, 1=CAB, 2=EFFECTS, 3=EQ, 4=SYSTEM
+  uint8_t volume;
+  uint8_t gain;
+  uint8_t bass;
+  uint8_t middle;
+  uint8_t treble;
+  uint8_t level;
+  uint8_t bpm;
+  bool connected;
+  unsigned long lastUpdate;
+};
+
+UIState uiState = {0, 0, 100, 65, 50, 60, 70, 80, 120, true, 0};
+
+// Chain de efeitos
+EffectSlot effectChain[] = {
+  {"GATE", COLOR_EFFECT_GATE, true, 10, 80, 40, 40},
+  {"COMP", COLOR_EFFECT_COMP, false, 55, 80, 40, 40},
+  {"DRV", COLOR_EFFECT_DRV, true, 100, 80, 40, 40},
+  {"AMP", COLOR_EFFECT_AMP, true, 145, 80, 40, 40},
+  {"CAB", COLOR_EFFECT_CAB, true, 190, 80, 40, 40},
+  {"DELAY", COLOR_EFFECT_DELAY, true, 235, 80, 40, 40},
+  {"REVERB", COLOR_EFFECT_REVERB, false, 280, 80, 40, 40}
+};
+
+const int numEffects = sizeof(effectChain) / sizeof(EffectSlot);
 
 // ============================================================================
-// CORES (TEMA PROFISSIONAL - RGB565)
-// ============================================================================
-#define COLOR_BG ILI9341_BLACK        // Preto
-#define COLOR_ACCENT ILI9341_CYAN     // Ciano
-#define COLOR_ACTIVE ILI9341_RED      // Vermelho
-#define COLOR_INACTIVE 0x4208         // Cinza escuro
-#define COLOR_TEXT ILI9341_WHITE      // Branco
-#define COLOR_SUCCESS ILI9341_GREEN   // Verde
-#define COLOR_WARN ILI9341_YELLOW     // Amarelo
-
-// ============================================================================
-// PROTÓTIPOS DE FUNÇÃO
+// PROTÓTIPOS
 // ============================================================================
 void initDisplay();
 void initMIDI();
+void initButtons();
 void updateDisplay();
 void drawHeader();
-void drawPresetSelector();
-void drawEffectsList();
-void drawParameterControls();
-void drawStatusBar();
-void sendMIDICommand(uint8_t command, uint8_t data1, uint8_t data2);
-void handleButtonInput();
-void drawWaveform();
+void drawTabs();
+void drawAmpTab();
+void drawEffectsChain();
+void drawParameterPanel();
+void drawFooter();
+void handleButtons();
+void sendMIDICommand(uint8_t cmd, uint8_t data1, uint8_t data2);
+void drawBox(int x, int y, int w, int h, uint16_t color, const char* text);
+void drawKnob(int x, int y, int size, uint8_t value, const char* label);
 
 // ============================================================================
 // SETUP
@@ -72,66 +75,65 @@ void setup() {
   Serial.begin(115200);
   delay(2000);
   
-  Serial.println("\n\n=== Valeton GP200LT Controller ===");
-  Serial.println("Display: ILI9341 (320x240)");
-  Serial.println("Initializing...");
+  Serial.println("\n\n╔════════════════════════════════════════╗");
+  Serial.println("║   VALETON GP200LT CONTROLLER v1.0    ║");
+  Serial.println("║      Display: ILI9341 (320x240)      ║");
+  Serial.println("╚════════════════════════════════════════╝\n");
   
-  // Inicializa display
   initDisplay();
-  
-  // Inicializa comunicação MIDI
   initMIDI();
+  initButtons();
   
-  // Configurar entradas (botões, sensores)
-  pinMode(A0, INPUT);  // Knob rotativo
-  pinMode(6, INPUT_PULLUP);  // Botão esquerda
-  pinMode(7, INPUT_PULLUP);  // Botão direita
-  pinMode(5, INPUT_PULLUP);  // Botão enter
-  
-  Serial.println("System Ready!");
+  Serial.println("✓ System Ready!");
 }
 
 // ============================================================================
 // LOOP PRINCIPAL
 // ============================================================================
 void loop() {
-  handleButtonInput();
+  handleButtons();
   
-  // Processar mensagens MIDI da pedaleira
   if (MIDI.read()) {
-    uint8_t channel = MIDI.getChannel();
-    uint8_t command = MIDI.getType();
+    uint8_t cmd = MIDI.getType();
+    uint8_t data1 = MIDI.getData1();
+    uint8_t data2 = MIDI.getData2();
     
-    Serial.printf("MIDI Received: Type=%d, Data1=%d, Data2=%d\n", 
-                  command, MIDI.getData1(), MIDI.getData2());
+    Serial.printf("MIDI IN: Type=0x%02X, Data1=%d, Data2=%d\n", cmd, data1, data2);
   }
   
-  updateDisplay();
-  delay(50);
+  if (millis() - uiState.lastUpdate >= DISPLAY_UPDATE_RATE) {
+    updateDisplay();
+    uiState.lastUpdate = millis();
+  }
+  
+  delay(10);
 }
 
 // ============================================================================
-// INICIALIZAÇÃO DO DISPLAY
+// INICIALIZAÇÃO DISPLAY
 // ============================================================================
 void initDisplay() {
   display.begin();
-  
-  // Tela de inicialização
+  display.setRotation(0);
   display.fillScreen(COLOR_BG);
-  display.setTextColor(COLOR_TEXT);
+  
+  // Tela de splash
+  display.setTextColor(COLOR_ACCENT);
   display.setTextSize(3);
-  display.setCursor(40, 100);
+  display.setCursor(50, 100);
   display.println("GP200LT");
+  
   display.setTextSize(1);
+  display.setTextColor(COLOR_TEXT_DIM);
   display.setCursor(80, 150);
-  display.println("Controller v1.0");
+  display.println("COMPANION");
+  
   display.setCursor(60, 170);
-  display.println("Initializing Display...");
+  display.println("Initializing...");
   
   delay(2000);
   
-  display.fillScreen(COLOR_BG);
-  Serial.println("Display initialized successfully!");
+  Serial.println("✓ Display initialized");
 }
 
 // ============================================================================
@@ -139,172 +141,290 @@ void initDisplay() {
 // ============================================================================
 void initMIDI() {
   MIDI.begin(MIDI_CHANNEL_OMNI);
-  Serial.println("MIDI Initialized on Serial1 (RX2/TX2)");
+  Serial.println("✓ MIDI initialized on Serial1");
 }
 
 // ============================================================================
-// ATUALIZA DISPLAY
+// INICIALIZAÇÃO BOTÕES
+// ============================================================================
+void initButtons() {
+  pinMode(BTN_LEFT, INPUT_PULLUP);
+  pinMode(BTN_RIGHT, INPUT_PULLUP);
+  pinMode(BTN_ENTER, INPUT_PULLUP);
+  pinMode(BTN_MENU, INPUT_PULLUP);
+  
+  Serial.println("✓ Buttons initialized");
+}
+
+// ============================================================================
+// ATUALIZA DISPLAY COMPLETO
 // ============================================================================
 void updateDisplay() {
   display.fillScreen(COLOR_BG);
   
   drawHeader();
-  drawPresetSelector();
-  drawEffectsList();
-  drawParameterControls();
-  drawStatusBar();
+  drawTabs();
+  
+  switch(uiState.currentTab) {
+    case 0: drawAmpTab(); break;
+    case 1: break; // CAB Tab
+    case 2: drawEffectsChain(); break;
+    case 3: break; // EQ Tab
+    case 4: break; // SYSTEM Tab
+  }
+  
+  drawParameterPanel();
+  drawFooter();
 }
 
 // ============================================================================
 // DESENHA CABEÇALHO
 // ============================================================================
 void drawHeader() {
-  // Linha superior
-  display.drawFastHLine(0, 30, SCREEN_WIDTH, COLOR_ACCENT);
+  // Fundo do header
+  display.fillRect(0, 0, SCREEN_WIDTH, HEADER_HEIGHT, COLOR_ACCENT_DARK);
+  display.drawFastHLine(0, HEADER_HEIGHT - 1, SCREEN_WIDTH, COLOR_ACCENT);
+  
+  // WiFi Icon
   display.setTextColor(COLOR_ACCENT);
+  display.setTextSize(1);
+  display.setCursor(5, 5);
+  display.print("WiFi");
+  
+  // Título central
+  display.setTextColor(COLOR_TEXT);
   display.setTextSize(2);
-  display.setCursor(10, 8);
-  display.println("VALETON GP200LT");
+  int textWidth = 120;
+  display.setCursor((SCREEN_WIDTH - textWidth) / 2, 8);
+  display.print("GP200");
+  
+  // BPM
+  display.setTextColor(COLOR_WARN);
+  display.setTextSize(1);
+  display.setCursor(220, 5);
+  display.printf("BPM %d", uiState.bpm);
+  
+  // Volume
+  display.setTextColor(COLOR_TEXT);
+  display.setCursor(220, 20);
+  display.printf("VOL %d%%", uiState.volume);
 }
 
 // ============================================================================
-// SELETOR DE PRESETS
+// DESENHA ABAS (TABS)
 // ============================================================================
-void drawPresetSelector() {
-  int y = 45;
-  int boxWidth = 70;
-  int boxHeight = 50;
-  int spacing = 80;
+void drawTabs() {
+  const char* tabs[] = {"AMP", "CAB", "EFFECTS", "EQ", "SYSTEM"};
+  int tabWidth = SCREEN_WIDTH / 5;
+  int tabY = HEADER_HEIGHT + 2;
   
+  for (int i = 0; i < 5; i++) {
+    uint16_t bgColor = (i == uiState.currentTab) ? COLOR_ACCENT : COLOR_INACTIVE;
+    uint16_t textColor = (i == uiState.currentTab) ? COLOR_BG : COLOR_TEXT;
+    
+    display.fillRect(i * tabWidth, tabY, tabWidth, 20, bgColor);
+    display.setTextColor(textColor);
+    display.setTextSize(1);
+    
+    int textLen = strlen(tabs[i]) * 6;
+    int x = (i * tabWidth) + (tabWidth - textLen) / 2;
+    display.setCursor(x, tabY + 6);
+    display.print(tabs[i]);
+  }
+  
+  // Linha divisória
+  display.drawFastHLine(0, tabY + 20, SCREEN_WIDTH, COLOR_ACCENT);
+}
+
+// ============================================================================
+// ABA AMP
+// ============================================================================
+void drawAmpTab() {
+  // Seção título
+  display.setTextColor(COLOR_ACCENT);
+  display.setTextSize(1);
+  display.setCursor(10, 70);
+  display.println("MATCHLESS DC30");
+  
+  display.setTextColor(COLOR_WARN);
+  display.setCursor(10, 80);
+  display.println("VINTAGE");
+  
+  // Área de efeitos/chain (simplificado)
+  display.drawRect(10, 70, 300, 60, COLOR_ACCENT);
+}
+
+// ============================================================================
+// DESENHA CADEIA DE EFEITOS
+// ============================================================================
+void drawEffectsChain() {
   display.setTextColor(COLOR_TEXT);
   display.setTextSize(1);
-  display.setCursor(10, y - 15);
-  display.println("PRESETS");
+  display.setCursor(10, 70);
+  display.println("EFFECTS CHAIN");
   
-  // Mostrar 4 presets na primeira linha
-  for (int i = 0; i < 4; i++) {
-    int x = 10 + (i * spacing);
-    uint16_t color = (pedalState.currentPreset == i) ? COLOR_ACTIVE : COLOR_INACTIVE;
+  // Desenha cada efeito
+  for (int i = 0; i < numEffects; i++) {
+    EffectSlot* effect = &effectChain[i];
     
-    display.drawRect(x, y, boxWidth, boxHeight, color);
-    if (pedalState.currentPreset == i) {
-      display.fillRect(x + 2, y + 2, boxWidth - 4, boxHeight - 4, COLOR_ACTIVE);
+    uint16_t boxColor = effect->active ? effect->color : COLOR_INACTIVE;
+    
+    // Box do efeito
+    display.drawRect(effect->x, effect->y, effect->width, effect->height, boxColor);
+    
+    if (effect->active) {
+      display.fillRect(effect->x + 2, effect->y + 2, 
+                       effect->width - 4, effect->height - 4, boxColor);
       display.setTextColor(COLOR_BG);
     } else {
-      display.setTextColor(color);
+      display.setTextColor(boxColor);
     }
-    display.setTextSize(2);
-    display.setCursor(x + 25, y + 15);
-    display.printf("%d", i + 1);
-  }
-}
-
-// ============================================================================
-// LISTA DE EFEITOS
-// ============================================================================
-void drawEffectsList() {
-  int y = 110;
-  display.setTextColor(COLOR_ACCENT);
-  display.setTextSize(1);
-  display.setCursor(10, y);
-  display.println("ACTIVE EFFECTS:");
-  
-  y += 15;
-  
-  const char* effects[] = {"DRIVE", "MODULATION", "DELAY", "REVERB"};
-  bool status[] = {true, false, true, false};
-  
-  for (int i = 0; i < 4; i++) {
-    uint16_t color = status[i] ? COLOR_SUCCESS : COLOR_INACTIVE;
-    display.setTextColor(color);
+    
+    // Nome do efeito
     display.setTextSize(1);
-    display.setCursor(20, y + (i * 13));
-    display.printf("● %s", effects[i]);
+    int nameLen = strlen(effect->name) * 6;
+    int textX = effect->x + (effect->width - nameLen) / 2;
+    display.setCursor(textX, effect->y + 15);
+    display.print(effect->name);
   }
 }
 
 // ============================================================================
-// CONTROLES DE PARÂMETROS
+// PAINEL DE PARÂMETROS
 // ============================================================================
-void drawParameterControls() {
-  int y = 180;
-  display.setTextColor(COLOR_ACCENT);
-  display.setTextSize(1);
-  display.setCursor(10, y);
-  display.println("VOLUME");
+void drawParameterPanel() {
+  int panelY = 130;
+  int col1X = 10;
+  int col2X = 165;
+  int knobSize = 30;
+  int spacing = 50;
   
-  // Barra de volume
-  int barWidth = 150;
-  int barHeight = 15;
-  int volumePos = (pedalState.volume * barWidth) / 100;
+  // Coluna esquerda
+  drawKnob(col1X, panelY, knobSize, uiState.gain, "GAIN");
+  drawKnob(col1X, panelY + spacing, knobSize, uiState.bass, "BASS");
   
-  display.drawRect(50, y + 5, barWidth, barHeight, COLOR_INACTIVE);
-  display.fillRect(50, y + 5, volumePos, barHeight, COLOR_ACCENT);
+  // Coluna direita
+  drawKnob(col2X, panelY, knobSize, uiState.middle, "MIDDLE");
+  drawKnob(col2X, panelY + spacing, knobSize, uiState.treble, "TREBLE");
   
+  // Parâmetros inferiores
+  int bottomY = panelY + spacing + spacing;
   display.setTextColor(COLOR_TEXT);
   display.setTextSize(1);
-  display.setCursor(210, y + 10);
-  display.printf("%d%%", pedalState.volume);
+  
+  // Level
+  display.setCursor(10, bottomY);
+  display.printf("LEVEL: %d", uiState.level);
+  display.drawRect(10, bottomY + 12, 150, 10, COLOR_INACTIVE);
+  display.fillRect(10, bottomY + 12, (uiState.level * 150) / 127, 10, COLOR_ACCENT);
 }
 
 // ============================================================================
-// BARRA DE STATUS
+// DESENHA KNOB (BOTÃO ROTATIVO)
 // ============================================================================
-void drawStatusBar() {
-  int y = SCREEN_HEIGHT - 20;
+void drawKnob(int x, int y, int size, uint8_t value, const char* label) {
+  // Círculo externo
+  display.drawCircle(x + size/2, y + size/2, size/2, COLOR_ACCENT);
   
-  display.drawFastHLine(0, y, SCREEN_WIDTH, COLOR_ACCENT);
-  display.setTextColor(COLOR_ACCENT);
+  // Preenchimento do valor
+  int fillSize = (size * value) / 127;
+  display.fillCircle(x + size/2, y + size/2, fillSize/2, COLOR_ACCENT);
+  
+  // Rótulo
+  display.setTextColor(COLOR_TEXT_DIM);
   display.setTextSize(1);
-  display.setCursor(10, y + 5);
-  display.println("< PREV | SELECT | NEXT >");
+  int labelLen = strlen(label) * 6;
+  display.setCursor(x + size/2 - labelLen/2, y + size + 5);
+  display.print(label);
+  
+  // Valor
+  display.setTextColor(COLOR_ACCENT);
+  display.setCursor(x + size/2 - 10, y + size/2 - 3);
+  display.printf("%d", value);
+}
+
+// ============================================================================
+// RODAPÉ
+// ============================================================================
+void drawFooter() {
+  int footerY = SCREEN_HEIGHT - FOOTER_HEIGHT;
+  
+  // Fundo
+  display.fillRect(0, footerY, SCREEN_WIDTH, FOOTER_HEIGHT, COLOR_ACCENT_DARK);
+  display.drawFastHLine(0, footerY, SCREEN_WIDTH, COLOR_ACCENT);
+  
+  // Informações
+  display.setTextColor(COLOR_TEXT);
+  display.setTextSize(1);
+  display.setCursor(10, footerY + 5);
+  display.printf("Preset: %d/%d", uiState.currentPreset + 1, PRESET_MAX + 1);
+  
+  // Status conexão
+  uint16_t statusColor = uiState.connected ? COLOR_SUCCESS : COLOR_DANGER;
+  display.setTextColor(statusColor);
+  display.setCursor(280, footerY + 5);
+  display.print(uiState.connected ? "ONLINE" : "OFFLINE");
+}
+
+// ============================================================================
+// BOX GENÉRICO
+// ============================================================================
+void drawBox(int x, int y, int w, int h, uint16_t color, const char* text) {
+  display.drawRect(x, y, w, h, color);
+  display.setTextColor(color);
+  display.setTextSize(1);
+  
+  int textLen = strlen(text) * 6;
+  int textX = x + (w - textLen) / 2;
+  int textY = y + (h / 2) - 4;
+  display.setCursor(textX, textY);
+  display.print(text);
+}
+
+// ============================================================================
+// TRATAMENTO DE BOTÕES
+// ============================================================================
+void handleButtons() {
+  static unsigned long lastPress[4] = {0, 0, 0, 0};
+  
+  // Botão LEFT - Preset anterior
+  if (digitalRead(BTN_LEFT) == LOW && millis() - lastPress[0] > DEBOUNCE_TIME) {
+    if (uiState.currentPreset > 0) {
+      uiState.currentPreset--;
+      sendMIDICommand(0xC0, uiState.currentPreset, 0);
+      Serial.printf("↓ Preset: %d\n", uiState.currentPreset);
+    }
+    lastPress[0] = millis();
+  }
+  
+  // Botão RIGHT - Próximo preset
+  if (digitalRead(BTN_RIGHT) == LOW && millis() - lastPress[1] > DEBOUNCE_TIME) {
+    if (uiState.currentPreset < PRESET_MAX) {
+      uiState.currentPreset++;
+      sendMIDICommand(0xC0, uiState.currentPreset, 0);
+      Serial.printf("↑ Preset: %d\n", uiState.currentPreset);
+    }
+    lastPress[1] = millis();
+  }
+  
+  // Botão ENTER - Select
+  if (digitalRead(BTN_ENTER) == LOW && millis() - lastPress[2] > DEBOUNCE_TIME) {
+    Serial.println("✓ Select pressed");
+    lastPress[2] = millis();
+  }
+  
+  // Botão MENU - Próxima aba
+  if (digitalRead(BTN_MENU) == LOW && millis() - lastPress[3] > DEBOUNCE_TIME) {
+    uiState.currentTab = (uiState.currentTab + 1) % 5;
+    Serial.printf("→ Tab: %d\n", uiState.currentTab);
+    lastPress[3] = millis();
+  }
 }
 
 // ============================================================================
 // ENVIAR COMANDO MIDI
 // ============================================================================
-void sendMIDICommand(uint8_t command, uint8_t data1, uint8_t data2) {
-  MIDI.send(command, data1, data2, 1);
-  Serial.printf("MIDI Sent: Cmd=0x%02X, D1=%d, D2=%d\n", command, data1, data2);
-}
-
-// ============================================================================
-// TRATAMENTO DE ENTRADA
-// ============================================================================
-void handleButtonInput() {
-  // Botão esquerda (PREV)
-  if (digitalRead(6) == LOW) {
-    delay(20);
-    if (digitalRead(6) == LOW) {
-      if (pedalState.currentPreset > 0) {
-        pedalState.currentPreset--;
-        sendMIDICommand(0xC0, pedalState.currentPreset, 0);
-        Serial.printf("Preset changed to: %d\n", pedalState.currentPreset);
-        delay(200);
-      }
-    }
-  }
-  
-  // Botão direita (NEXT)
-  if (digitalRead(7) == LOW) {
-    delay(20);
-    if (digitalRead(7) == LOW) {
-      if (pedalState.currentPreset < 127) {
-        pedalState.currentPreset++;
-        sendMIDICommand(0xC0, pedalState.currentPreset, 0);
-        Serial.printf("Preset changed to: %d\n", pedalState.currentPreset);
-        delay(200);
-      }
-    }
-  }
-  
-  // Botão enter (SELECT)
-  if (digitalRead(5) == LOW) {
-    delay(20);
-    if (digitalRead(5) == LOW) {
-      // Ação para botão select
-      Serial.println("SELECT button pressed");
-      delay(200);
-    }
-  }
+void sendMIDICommand(uint8_t cmd, uint8_t data1, uint8_t data2) {
+  MIDI.send(cmd, data1, data2, 1);
+  Serial.printf("MIDI OUT: Cmd=0x%02X, D1=%d, D2=%d\n", cmd, data1, data2);
 }
