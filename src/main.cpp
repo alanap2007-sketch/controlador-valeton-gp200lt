@@ -125,22 +125,15 @@ void initDisplay() {
   digitalWrite(TFT_RST, HIGH);
   delay(200);
   
-  Serial.println("RST pulso completo");
+  Serial.println("RST pulse complete");
   
   // Inicializar SPI
   SPI.begin(TFT_CLK, TFT_MISO, TFT_MOSI);
-  Serial.println("SPI iniciado");
+  Serial.println("SPI started");
   
   // Inicializar display
-  if (!display.begin()) {
-    Serial.println("ERROR: Display initialization failed!");
-    while(1) {
-      Serial.println("✗ Display failed");
-      delay(1000);
-    }
-  }
-  
-  Serial.println("Display initialized successfully");
+  display.begin();
+  Serial.println("Display initialized");
   
   display.setRotation(0);
   display.fillScreen(COLOR_BG);
